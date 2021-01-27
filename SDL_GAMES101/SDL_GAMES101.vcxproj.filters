@@ -18,15 +18,27 @@
     <ClCompile Include="main.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="Gfx.cpp">
+    <ClCompile Include="Rasterizer.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="SoftwareRenderer.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="Gfx.h">
+    <ClInclude Include="IShader.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="IShader.h">
+    <ClInclude Include="Rasterizer.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="SoftwareRenderer.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="RenderContext.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="ShaderUtils.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

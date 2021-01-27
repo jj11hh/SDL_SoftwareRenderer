@@ -1,15 +1,18 @@
 #include <SDL/SDL.h>
 #include <eigen3/Eigen/Eigen>
-#include "Gfx.h"
+#include "IShader.h"
+#include "ShaderUtils.h"
+#include "SoftwareRenderer.h"
+#include "RenderContext.h"
 
 #include <windows.h>
 #include <cmath>
 #include <sstream>
+#include <iomanip>
 
 #undef near
 #undef far
 
-using v2i = Gfx::v2i;
 using v3f = Eigen::Vector3f;
 using v4f = Eigen::Vector4f;
 using mat4f = Eigen::Matrix4f;
@@ -20,22 +23,23 @@ constexpr float PI = 3.1415926535897932384f;
 
 mat4f make_view_matrix(v3f cameraAt, v3f lookAt, v3f upAt) {
 	
-	mat4f Rview, Tview;
+	mat4f rotate, translate;
 
-	Rview.fill(0);
-	Tview <<	1, 0, 0, cameraAt(0),
-				0, 1, 0, cameraAt(1),
-				0, 0, 1, cameraAt(2),
-				0, 0, 0, 1;
+	translate <<
+		1, 0, 0, -cameraAt.x(),
+		0, 1, 0, -cameraAt.y(),
+		0, 0, 1, -cameraAt.z(),
+		0, 0, 0, 1;
 
 	v3f newX = lookAt.cross(upAt);
 
-	Rview << newX.x(), newX.y(), newX.z(), 0,
-			 upAt.x(), upAt.y(), upAt.z(), 0,
-			 -lookAt.x(), -lookAt.y(), -lookAt.z(), 0,
-			 0,        0,        0,        1;
+	rotate << 
+		newX.x(), newX.y(), newX.z(), 0,
+		upAt.x(), upAt.y(), upAt.z(), 0,
+		-lookAt.x(), -lookAt.y(), -lookAt.z(), 0,
+		0,        0,        0,        1;
 
-	return Rview * Tview;
+	return rotate * translate;
 }
 
 mat4f make_ortho_matrix(float left, float right, float top, float bottom, float near, float far) {
@@ -50,7 +54,57 @@ mat4f make_ortho_matrix(float left, float right, float top, float bottom, float 
 	return S * T;
 }
 
-class Renderer {
+mat4f make_prespective_matrix(float fovy, float aspect, float near, float far) {
+	float t = fabsf(near) * tanf(fovy / 2);
+	float r = t / aspect;
+
+	mat4f mat;
+	mat <<
+		near / r, 0, 0, 0,
+		0, near / t, 0, 0,
+		0, 0, (far + near) / (near - far), 2 * far * near / (far - near),
+		0, 0, 1, 0;
+
+	return mat;
+}
+
+class BoxDrawer {
+	class Shader : public IShader, private ShaderUtils {
+		mat4f modelview;
+
+		const ShaderDescriptor desc = {sizeof(v3f), 0};
+		const Eigen::Vector4f colorOfFaces[6] = {
+			{1.0f, 0.0f, 0.0f, 1.0f},
+			{0.0f, 1.0f, 0.0f, 1.0f},
+			{0.0f, 0.0f, 1.0f, 1.0f},
+			{1.0f, 1.0f, 0.0f, 1.0f},
+			{1.0f, 0.0f, 1.0f, 1.0f},
+			{0.0f, 1.0f, 1.0f, 1.0f},
+		};
+
+	public:
+		const ShaderDescriptor& getDesc() noexcept final {
+			return desc;
+		}
+		void vertexShader(const RenderContext* pCtx, const void* inputDatas, Eigen::VectorXf &vertex_out) noexcept final {
+			auto &vertex_in = extractParam<v3f>(inputDatas);
+
+			vertex_out.resize(7);
+			vertex_out.segment<4>(0) = modelview * v4f(vertex_in.x(), vertex_in.y(), vertex_in.z(), 1.0f);
+			vertex_out.segment<3>(4) = vertex_in * 0.5 + v3f(0.2, 0.2, 0.2);
+		};
+		void fragmentShader(const RenderContext* pCtx, const Eigen::VectorXf &inputData, Eigen::Vector4f &color_out) noexcept final {
+			int face = pCtx->primitiveID / 2;
+
+			//color_out = colorOfFaces[face];
+			color_out.segment<3>(0) = inputData.segment<3>(4);
+			color_out(3) = 1.0;
+		};
+
+		void setModelView(mat4f modelview) {
+			this->modelview = modelview;
+		}
+	};
 
 	const v3f box_points[8] = {
 		{0.0f, 0.0f, 0.0f}, // 0
@@ -63,70 +117,97 @@ class Renderer {
 		{1.0f, 1.0f, 1.0f}, // 7
 	};
 
-	const uint8_t box_indices[36] = {
-		0,6,4,0,2,6,
-		0,1,2,1,3,2,
-		1,5,7,1,7,3,
-		0,6,5,5,6,7,
-		2,7,6,2,3,7,
-		0,4,5,0,5,1,
+	const uint32_t box_indices[36] = {
+		1,5,3,3,5,7,
+		5,4,7,7,4,6,
+		4,0,6,6,0,2,
+		0,1,3,3,2,0,
+		7,6,3,3,6,2,
+		0,4,1,1,4,5
 	};
 
+	Shader shader;
+	std::unique_ptr<SoftwareRenderer> renderer;
+
 public:
+	BoxDrawer(SDL_Surface *surface) {
+		renderer = std::make_unique<SoftwareRenderer>(reinterpret_cast<uint32_t*>(surface->pixels), surface->w, surface->h, surface->pitch);
 
-	void draw(Gfx &ctx, mat4f &trans) {
+		//swrenderer.setDrawStyle(SoftwareRenderer::DrawStyle::TRIANGLES_WIREFRAME);
+		renderer->setDrawStyle(SoftwareRenderer::DrawStyle::TRIANGLES);
+		renderer->bindShader(&shader);
+		renderer->setBackfaceCull(true);
+		renderer->setVertexArray(box_points, 8);
 
-	//	^ y
-	//	|   -\ z
-	//	|   /
-	//	|  /
-	//	| /
-	//	|/o
-	//	-------------> x
-
-		v3f camAt = { 0, 0, -2 };
-		v3f lookAt = (v3f(0.0f, 0.0f, 1.0f) - camAt).normalized();
-		v3f upAt = - v3f(1.0f, 0.0f, 0.0f).cross(lookAt).normalized();
-
-
-		//camAt = trans *  camAt;
-		//lookAt = trans *  lookAt;
-		//upAt = trans * upAt;
-
-		mat4f Mview = make_view_matrix(camAt, lookAt, upAt) * trans;
-		mat4f Mortho = make_ortho_matrix(-2, 2, 1.5, -1.5, 0, 10);
-		mat4f MVP = Mortho * Mview;
-
-		for (int i = 0; i < sizeof(box_indices) / sizeof(uint8_t); i += 3) {
-			v3f triangle[3];
-			Gfx::Color colors[3];
-
-			for (int j = 0; j < 3; ++j) {
-	#define _P box_points[box_indices[i+j]]
-				v4f point(_P.x(), _P.y(), _P.z(), 1);
-				point = MVP * point;
-				triangle[j].x() = point.x() * 400 + 400;
-				triangle[j].y() = 600 - (point.y() * 300 + 300);
-				triangle[j].z() = point.z();
-
-				colors[j] = { static_cast<uint8_t>(_P.x() * 192),
-					static_cast<uint8_t>(_P.y() * 192), 
-					static_cast<uint8_t>(_P.z() * 192), 255 };
-	#undef _P
-			}
-
-			std::ostringstream ss;
-			ss << "(" << triangle[0](0) << ", " << triangle[0](1) << "), ";
-			ss << "(" << triangle[1](0) << ", " << triangle[1](1) << "), ";
-			ss << "(" << triangle[2](0) << ", " << triangle[2](1) << ")" << std::endl;
-
-			OutputDebugStringA(ss.str().c_str());
-
-			//ctx.drawTriangle(triangle, colors);
-			ctx.strokeTriangle(triangle, {255, 0, 0});
-		}
 	}
 
+	void draw(mat4f &trans) {
+
+		v3f camAt = { 0, 0, -5 };
+		v3f lookAt = (v3f(0.0f, 0.0f, 1.0f) - camAt).normalized();
+		v3f upAt = - v3f(0.0f, 1.0f, 0.0f).normalized();
+
+		mat4f Mview = make_view_matrix(camAt, lookAt, upAt);
+		//mat4f Mortho = make_ortho_matrix(-2, 2, 1.5, -1.5, -2, -10);
+		mat4f Mortho = make_prespective_matrix(PI * 60 / 360, 3.0f / 4.0f, -2, -10);
+		mat4f MVP = Mortho * Mview * trans;
+		shader.setModelView(MVP);
+		renderer->setDrawStyle(SoftwareRenderer::DrawStyle::TRIANGLES);
+		renderer->drawIndexed(box_indices, 36);
+		renderer->setDrawStyle(SoftwareRenderer::DrawStyle::TRIANGLES_WIREFRAME);
+		renderer->drawIndexed(box_indices, 36);
+	}
+
+};
+
+class TriangleDrawer {
+	struct Vertex {
+		Eigen::Vector2f pos;
+		Eigen::Vector3f color;
+	};
+
+	class Shader : public IShader, private ShaderUtils {
+		const ShaderDescriptor desc = { sizeof(Vertex), 0 };
+	public:
+		const ShaderDescriptor& getDesc() noexcept final {return desc;}
+
+		void vertexShader(const RenderContext* pCtx, const void* inputDatas, Eigen::VectorXf& vertex_out) noexcept final {
+			auto input = extractParam<Vertex>(inputDatas);
+			vertex_out.resize(7);
+			vertex_out.segment<4>(0) = Eigen::Vector4f(input.pos.x(), input.pos.y(), -1.0f, 1.0f);
+			vertex_out.segment<3>(4) = input.color;
+		}
+
+		void fragmentShader(const RenderContext* pCtx, const Eigen::VectorXf& inputData, Eigen::Vector4f& color_out) noexcept final {
+			color_out.segment<3>(0) = inputData.segment<3>(4);
+			// alpha
+			color_out(3) = 1.0f;
+		}
+	};
+
+	const Vertex vertices[3] = {
+		{{ -0.5f, 0.5f }, {1.0f, 0.0f, 0.0f}},
+		{{ 0.0f, -0.5f }, {0.0f, 0.0f, 1.0f}},
+		{{ 0.5f,  0.5f }, {0.0f, 1.0f, 0.0f}}, 
+	};
+
+	Shader shader;
+	std::unique_ptr<SoftwareRenderer> renderer;
+public:
+	TriangleDrawer(SDL_Surface* surface) {
+		renderer = std::make_unique<SoftwareRenderer>(reinterpret_cast<uint32_t*>(surface->pixels), surface->w, surface->h, surface->pitch);
+		renderer->setBackfaceCull(true);
+		renderer->bindShader(&shader);
+		renderer->setVertexArray(vertices, sizeof(vertices) / sizeof(Vertex));
+
+
+	}
+	void draw(mat4f& trans) {
+		renderer->setDrawStyle(SoftwareRenderer::DrawStyle::TRIANGLES);
+		renderer->draw();
+		renderer->setDrawStyle(SoftwareRenderer::DrawStyle::TRIANGLES_WIREFRAME);
+		renderer->draw();
+	}
 };
 
 
@@ -134,33 +215,29 @@ int main(int argc, char* args[]) {
 	SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER);
 
 	auto *screen = SDL_SetVideoMode(800, 600, 32, SDL_SWSURFACE);
-	auto ctx = Gfx(screen);
-
-
-	// Draw Triangle
-//
-//	v2i prim[] = {
-//		v2i(100, 400),
-//		v2i(100, 100),
-//		v2i(500, 250),
-//		v2i(100, 400),
-//	};
-//
-//	for (uint8_t i = 0; i < sizeof(prim) / sizeof(v2i) - 1; ++i) {
-//		ctx.drawLine(prim[i], prim[i + 1], { (uint8_t)(64*i), (uint8_t)(255-64*i), 0, 255 });
-//		std::cout << prim[i] << ", " << prim[i + 1] << std::endl;
-//		SDL_Flip(screen);
-//		SDL_Delay(1000);
-//	}
 
 	mat4f rotate = mat4f::Identity();
+	BoxDrawer renderer(screen);
+	//TriangleDrawer renderer(screen);
 
-	Renderer renderer;
+	uint32_t lastTime = 0, currentTime;
+	uint32_t fpsCount = 0;
 
 	for (;;) {
-		SDL_FillRect(screen, nullptr, Gfx::Color(0, 0, 0, 0).pixel);
-		ctx.clearZBuffer();
-		renderer.draw(ctx, rotate);
+		currentTime = SDL_GetTicks();
+		uint32_t timeElasped = currentTime - lastTime;
+		fpsCount++;
+		if (timeElasped >= 1000) {
+			std::stringstream ss;
+			ss << "Yiheng's Software Renderer - FPS: " << fpsCount;
+			SDL_WM_SetCaption(ss.str().c_str(), nullptr);
+			
+			fpsCount = 0;
+			lastTime = currentTime;
+		}
+
+		SDL_FillRect(screen, nullptr, 0);
+		renderer.draw(rotate);
 		SDL_Flip(screen);
 
 		SDL_Event event;
@@ -174,16 +251,16 @@ int main(int argc, char* args[]) {
 		else if (event.type == SDL_KEYDOWN) {
 			switch (event.key.keysym.sym) {
 			case SDLK_UP:
-				rotate_acc = AAf((5.0f / 180) * PI, v3f(1,0,0)).toRotationMatrix();
+				rotate_acc = AAf((1.0f / 180) * PI, v3f(1,0,0)).toRotationMatrix();
 				break;
 			case SDLK_DOWN:
-				rotate_acc = AAf((-5.0f / 180) * PI, v3f(1,0,0)).toRotationMatrix();
+				rotate_acc = AAf((-1.0f / 180) * PI, v3f(1,0,0)).toRotationMatrix();
 				break;
 			case SDLK_LEFT:
-				rotate_acc = AAf((5.0f / 180) * PI, v3f(0,1,0)).toRotationMatrix();
+				rotate_acc = AAf((1.0f / 180) * PI, v3f(0,1,0)).toRotationMatrix();
 				break;
 			case SDLK_RIGHT:
-				rotate_acc = AAf((-5.0f / 180) * PI, v3f(0,1,0)).toRotationMatrix();
+				rotate_acc = AAf((-1.0f / 180) * PI, v3f(0,1,0)).toRotationMatrix();
 				break;
 
 
@@ -195,7 +272,7 @@ int main(int argc, char* args[]) {
 
 		rotate = rotate_acc_4f * rotate;
 
-		SDL_Delay(1000 / 30); // Running at 30 frame pre second
+		//SDL_Delay(1000 / 60); // Running at 30 frame pre second
 	}
 
 	SDL_Quit();
