@@ -6,8 +6,6 @@
 #define ABS(x) ((x) >= 0 ? (x) : -(x))
 
 static inline void m_setPixel(uint32_t* surface, int pitch, int w, int h, int x, int y, uint32_t color) {
-	//if (x < 0 || x >= w || y < 0 || y >= h) return;
-
 	uint8_t* target_u8 = reinterpret_cast<uint8_t *>(surface)
 		+ static_cast<uint64_t>(y) * pitch
 		+ x * sizeof(uint32_t);
@@ -15,6 +13,15 @@ static inline void m_setPixel(uint32_t* surface, int pitch, int w, int h, int x,
 	uint32_t* target = reinterpret_cast<uint32_t *>(target_u8);
 	*target = color;
 }
+
+static inline void m_getPixel(uint32_t* surface, int pitch, int w, int h, int x, int y, uint32_t *color) {
+	uint8_t* target_u8 = reinterpret_cast<uint8_t *>(surface)
+		+ static_cast<uint64_t>(y) * pitch
+		+ x * sizeof(uint32_t);
+
+	*color = *reinterpret_cast<uint32_t *>(target_u8);
+}
+
 
 static bool line_clipping(int Xmin, int Xmax, int Ymin, int Ymax, int& x0, int& y0, int& x1, int& y1) {
 	uint8_t code1 = 0;
@@ -165,7 +172,7 @@ static Eigen::Vector3f barycentricCoordinates(float x, float y, const Eigen::Vec
 	return { alpha, beta, gamma };
 }
 
-void Rasterizer::drawTriangleSample(SoftwareRenderer *renderer, RenderContext *ctx, const Eigen::VectorXf vertices[3])
+void Rasterizer::drawTriangleSample(SoftwareRenderer *renderer, RenderContext *ctx, Eigen::VectorXf vertices[3])
 {
 
 	auto pShader = renderer->pShader;
@@ -173,6 +180,8 @@ void Rasterizer::drawTriangleSample(SoftwareRenderer *renderer, RenderContext *c
 	auto pitch = renderer->pitch;
 	auto w = renderer->w;
 	auto h = renderer->h;
+	auto zBufferEnabled = renderer->zBufferEnabled;
+	auto pcEnabled = renderer->perspectiveCorrectEnabled;
 
 	assert(pShader != nullptr && "shader is null!");
 
@@ -181,11 +190,22 @@ void Rasterizer::drawTriangleSample(SoftwareRenderer *renderer, RenderContext *c
 	Eigen::Vector3f points[3];
 
 	for (int i = 0; i < 3; ++i) {
-		Eigen::Vector4f position = desc.extractPosition(vertices[i]);
-		// Do Clip (NOT IMPLEMENTED)
+		// Do Clip (TODO: NOT IMPLEMENTED)
 
 		// Do Perspective Division
-		position /= position.w();
+		const float infW = 1 / vertices[i](desc.positionPlacement + 3); // the W
+
+		// Do perspective division on all attributes 
+		// only when perspective correction is enabled.
+		// Otherwise, division is only be applied on position
+		if (pcEnabled)
+			vertices[i] *= infW;
+		else
+			vertices[i].segment<4>(desc.positionPlacement) *= infW;
+
+		vertices[i](desc.positionPlacement + 3) = infW;
+
+		Eigen::Vector4f position = desc.extractPosition(vertices[i]);
 
 		// Scale to viewport
 		points[i].x() = (position.x()+1.0f)/2 * w;
@@ -196,9 +216,10 @@ void Rasterizer::drawTriangleSample(SoftwareRenderer *renderer, RenderContext *c
 	Eigen::Vector2f AB = points[1].segment<2>(0) - points[0].segment<2>(0);
 	Eigen::Vector2f AC = points[2].segment<2>(0) - points[0].segment<2>(0);
 
-	bool isCCW = (AB.x() * AC.y() - AC.x() * AB.y()) > 0;
+	const float CrossResult = (AB.x() * AC.y() - AC.x() * AB.y());
+	const bool isCCW = CrossResult > 0.0f;
 
-	if (renderer->backfaceCull && (!isCCW)) {
+	if ((renderer->backfaceCull && (!isCCW)) || fabsf(CrossResult) < 0.01 ) {
 		// cull it out
 		return;
 	}
@@ -227,22 +248,58 @@ void Rasterizer::drawTriangleSample(SoftwareRenderer *renderer, RenderContext *c
 	Eigen::VectorXf attrXAcc = cooAcc[0].x() * vertices[0] + cooAcc[0].y() * vertices[1] + cooAcc[0].z() * vertices[2];
 	Eigen::VectorXf attrYAcc = cooAcc[1].x() * vertices[0] + cooAcc[1].y() * vertices[1] + cooAcc[1].z() * vertices[2];
 
+	Eigen::VectorXf fixedAttr = vertices[0];
+	Eigen::VectorXf attrPixel = vertices[0];
+	Eigen::Vector3f cooPixel;
+	Eigen::Vector4f fcolor;
+
 	uint8_t color[4];
+	uint8_t density = renderer->sampleDensity;
 
 	for (int y = aabb.y0; y < aabb.y1; ++y) {
-		auto cooPixel = cooLine;
-		auto attrPixel = attrLine;
+		cooPixel = cooLine;
+		attrPixel = attrLine;
 		for (int x = aabb.x0; x < aabb.x1; ++x) {
-			Eigen::Vector4f fcolor;
-			pShader->fragmentShader(ctx, attrPixel, fcolor);
-			color[0] = fcolor(2) * 255;
-			color[1] = fcolor(1) * 255;
-			color[2] = fcolor(0) * 255;
-			color[3] = fcolor(3) * 255;
 
-			if (cooPixel.x() > 0 && cooPixel.y() > 0 && cooPixel.z() > 0)
-				m_setPixel(surface, pitch, w, h, x, h - y - 1, *reinterpret_cast<uint32_t*>(color));
+			// discard fragment if not in density grid
+			if (!density || (x % (density + 1) == 0 && y % (density + 1) == 0)) {
+				if (cooPixel.x() > 0 && cooPixel.y() > 0 && cooPixel.z() > 0) {
+					const float infW = 1 / attrPixel(desc.positionPlacement + 3);
+					bool discard = false;
+					ctx->discard = [&] () { discard = true; };
+					if (pcEnabled) {
+						fixedAttr = attrPixel * infW;
+						pShader->fragmentShader(*ctx, fixedAttr, fcolor);
+					}
+					else {
+						pShader->fragmentShader(*ctx, attrPixel, fcolor);
+					}
 
+					if (!discard) {
+						fcolor(0) = std::min(fcolor(0), 1.0f);
+						fcolor(1) = std::min(fcolor(1), 1.0f);
+						fcolor(2) = std::min(fcolor(2), 1.0f);
+						fcolor(3) = std::min(fcolor(3), 1.0f);
+						fcolor *= 255;
+						color[0] = fcolor(2);
+						color[1] = fcolor(1);
+						color[2] = fcolor(0);
+						color[3] = fcolor(3);
+
+						float z = attrPixel(desc.positionPlacement + 2);
+						if (zBufferEnabled){
+							float& oldz = renderer->zBuffer[std::size_t(y) * w + x];
+							if (z > oldz) {
+								m_setPixel(surface, pitch, w, h, x, h - y - 1, *reinterpret_cast<uint32_t*>(color));
+								oldz = z;
+							}
+						}
+						else {
+							m_setPixel(surface, pitch, w, h, x, h - y - 1, *reinterpret_cast<uint32_t*>(color));
+						}
+					}
+				}
+			}
 			cooPixel += cooAcc[0];
 			attrPixel += attrXAcc;
 		}
@@ -251,7 +308,7 @@ void Rasterizer::drawTriangleSample(SoftwareRenderer *renderer, RenderContext *c
 	}
 }
 
-void Rasterizer::drawTriangleWireframe(SoftwareRenderer *renderer, RenderContext *ctx, const Eigen::VectorXf vertices[3])
+void Rasterizer::drawTriangleWireframe(SoftwareRenderer *renderer, RenderContext *ctx, Eigen::VectorXf vertices[3])
 {
 	auto pShader = renderer->pShader;
 	auto surface = renderer->frameBuffer;
@@ -272,8 +329,8 @@ void Rasterizer::drawTriangleWireframe(SoftwareRenderer *renderer, RenderContext
 		position /= position.w();
 
 		// Scale to viewport
-		points[i][0] = lroundf((position.x()+1.0f)/2 * w + 0.5);
-		points[i][1] = lroundf((position.y()+1.0f)/2 * h + 0.5);
+		points[i][0] = lroundf((position.x()+1.0f)/2 * w);
+		points[i][1] = lroundf((position.y()+1.0f)/2 * h);
 	}
 	Eigen::Vector2f AB(points[1][0] - points[0][0], points[1][1] - points[0][1]);
 	Eigen::Vector2f AC(points[2][0] - points[0][0], points[2][1] - points[0][1]);

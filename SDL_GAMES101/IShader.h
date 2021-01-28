@@ -19,7 +19,7 @@ public:
 	};
 
 	virtual const ShaderDescriptor& getDesc() noexcept = 0;
-	virtual void vertexShader(const RenderContext *pCtx, const void *inputDatas, Eigen::VectorXf &vertexOut) noexcept = 0;
-	virtual void fragmentShader(const RenderContext *pCtx, const Eigen::VectorXf &inputData, Eigen::Vector4f &colorOut) noexcept = 0;
+	virtual void vertexShader(const RenderContext &ctx, const void *inputDatas, Eigen::VectorXf &vertexOut) noexcept = 0;
+	virtual void fragmentShader(const RenderContext &ctx, const Eigen::VectorXf &inputData, Eigen::Vector4f &colorOut) noexcept = 0;
 };
 

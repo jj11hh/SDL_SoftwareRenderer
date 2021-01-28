@@ -22,6 +22,10 @@ private:
 	std::size_t vertexArrayLength = 0;
 	DrawStyle drawStyle = DrawStyle::TRIANGLES;
 	bool backfaceCull = false;
+	uint8_t sampleDensity = 0;
+	std::vector<float> zBuffer;
+	bool zBufferEnabled = false;
+	bool perspectiveCorrectEnabled = false;
 
 public:
 
@@ -32,6 +36,12 @@ public:
 	void setVertexArray(const void* vertexArray, std::size_t size);
 	void setDrawStyle(DrawStyle drawStyle);
 	void setBackfaceCull(bool enable);
+	void setSampleDensity(uint8_t density);
+	void setZBufferEnabled(bool enable);
+	void setPerspectiveCorrect(bool enable);
+	void clearZBuffer();
+	std::vector<float>& getZbuffer();
+
 	void draw();
 	void drawIndexed(const uint32_t* indices, std::size_t size);
 };
